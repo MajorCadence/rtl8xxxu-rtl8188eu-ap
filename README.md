@@ -1,3 +1,12 @@
+Trying to test out AP mode on a RTl8188EU chip. Applied patches from [here](https://lwn.net/ml/all/20260313131849.3148013-1-georgmueller@gmx.net/) with the help of AI. Testing with a TP-Link TL-WN725N USB wireless adapter on an NVIDIA Jetson Orin Nano (aarch64) on kernel 5.15. 
+
+Current Issues:
+* iwlwifi clients complain about missed beacons and won't stay connected. Issues with both:
+   * Intel Corporation Raptor Lake PCH CNVi WiFi (rev 01) (Windows and Linux both fail)
+   * Intel Corporation 400 Series Chipset Family CNVi Wi-Fi
+* broadcast/multicast traffic broken when one clients disconnects. This issue has been fixed, but I am still testing.
+
+  
 ## Linux Kernel Module "rtl8xxxu"
 
 Driver for Realtek 802.11n USB wireless chips, which is backported from linux mainline
