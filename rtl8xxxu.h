@@ -185,6 +185,7 @@ static inline void fsleep(unsigned long usecs)
 
 #define RTL_FW_PAGE_SIZE		4096
 #define RTL8XXXU_FIRMWARE_POLL_MAX	1000
+#define RTL8188E_MAX_MAC_ID_NUM		16
 
 #define RTL8723A_CHANNEL_GROUPS		3
 #define RTL8723A_MAX_RF_PATHS		2
@@ -1866,7 +1867,6 @@ struct rtl8xxxu_ra_info {
 	u16 drop;
 	u16 rpt_time;
 	u16 pre_min_rpt_time;
-	u8 dynamic_tx_rpt_timing_counter;
 	u8 ra_waiting_counter;
 	u8 ra_pending_counter;
 	u8 ra_drop_after_down;
@@ -2032,7 +2032,8 @@ struct rtl8xxxu_priv {
 	struct rtl8xxxu_btcoex bt_coex;
 	struct rtl8xxxu_ra_report ra_report;
 	struct rtl8xxxu_cfo_tracking cfo_tracking;
-	struct rtl8xxxu_ra_info ra_info;
+	struct rtl8xxxu_ra_info *ra_info;
+	u8 dynamic_tx_rpt_timing_counter; /* 8188e specific */
 
 	bool led_registered;
 	char led_name[32];

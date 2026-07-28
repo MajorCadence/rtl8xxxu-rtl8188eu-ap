@@ -3887,6 +3887,15 @@ void rtl8xxxu_init_burst(struct rtl8xxxu_priv *priv)
 	rtl8xxxu_write8(priv, REG_RSV_CTRL, val8);
 }
 
+static u8 rtl8xxxu_max_acquired_macid(struct rtl8xxxu_priv *priv)
+{
+	u8 macid;
+
+	macid = find_last_bit(priv->mac_id_map, RTL8XXXU_MAX_MAC_ID_NUM);
+
+	return macid;
+}
+
 static u8 rtl8xxxu_acquire_macid(struct rtl8xxxu_priv *priv)
 {
 	u8 macid;
@@ -4444,8 +4453,19 @@ static int rtl8xxxu_init_device(struct ieee80211_hw *hw)
 		priv->cfo_tracking.crystal_cap = priv->default_crystal_cap;
 	}
 
-	if (priv->rtl_chip == RTL8188E)
-		rtl8188e_ra_info_init_all(&priv->ra_info);
+	if (priv->rtl_chip == RTL8188E) {
+		u16 mac_id;
+
+		priv->ra_info = kmalloc_array(RTL8188E_MAX_MAC_ID_NUM,
+					      sizeof(*priv->ra_info),
+					      GFP_KERNEL);
+		if (!priv->ra_info) {
+			ret = -ENOMEM;
+			goto exit;
+		}
+		for (mac_id = 0; mac_id < RTL8188E_MAX_MAC_ID_NUM; mac_id++)
+			rtl8188e_ra_info_init_all(&priv->ra_info[mac_id]);
+	}
 
 	set_bit(RTL8XXXU_BC_MC_MACID, priv->mac_id_map);
 	set_bit(RTL8XXXU_BC_MC_MACID1, priv->mac_id_map);
@@ -5092,7 +5112,8 @@ static int rtl8xxxu_start_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	dev_dbg(dev, "Start AP mode\n");
 	rtl8xxxu_set_bssid(priv, vif->bss_conf.bssid, rtlvif->port_num);
 	rtl8xxxu_write16(priv, REG_BCN_INTERVAL, vif->bss_conf.beacon_int);
-	priv->fops->report_connect(priv, RTL8XXXU_BC_MC_MACID, 0, true);
+	priv->fops->report_connect(priv, RTL8XXXU_BC_MC_MACID,
+				   H2C_MACID_ROLE_AP, true);
 
 	return 0;
 }
@@ -5466,11 +5487,21 @@ rtl8xxxu_fill_txdesc_v3(struct ieee80211_hw *hw, struct ieee80211_hdr *hdr,
 {
 	struct rtl8xxxu_priv *priv = hw->priv;
 	struct device *dev = &priv->udev->dev;
-	struct rtl8xxxu_ra_info *ra = &priv->ra_info;
+	struct rtl8xxxu_ra_info *ra;
 	u8 *qc = ieee80211_get_qos_ctl(hdr);
 	u8 tid = qc[0] & IEEE80211_QOS_CTL_TID_MASK;
 	u32 rate = 0;
 	u16 seq_number;
+
+	/*
+	 * Broadcast/multicast frames must use the broadcast MACID's rate
+	 * info. The passed-in macid may be a group key CAM index for
+	 * encrypted frames, and ra_info for that index is not valid.
+	 */
+	if (tx_desc->txdw0 & TXDESC_BROADMULTICAST)
+		ra = &priv->ra_info[RTL8XXXU_BC_MC_MACID];
+	else
+		ra = &priv->ra_info[macid];
 
 	seq_number = IEEE80211_SEQ_TO_SN(le16_to_cpu(hdr->seq_ctrl));
 
@@ -6932,6 +6963,10 @@ static void rtl8xxxu_remove_interface(struct ieee80211_hw *hw,
 
 	dev_dbg(&priv->udev->dev, "%s\n", __func__);
 
+	if (vif->type == NL80211_IFTYPE_AP)
+		priv->fops->report_connect(priv, RTL8XXXU_BC_MC_MACID,
+					   H2C_MACID_ROLE_AP, false);
+
 	priv->vifs[rtlvif->port_num] = NULL;
 }
 
@@ -7189,7 +7224,11 @@ static int rtl8xxxu_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 		val32 = CAM_CMD_POLLING | CAM_CMD_WRITE |
 			key->hw_key_idx << CAM_CMD_KEY_SHIFT;
 		rtl8xxxu_write32(priv, REG_CAM_CMD, val32);
-		rtlvif->hw_key_idx = 0xff;
+		/* Only clear the group key index when the group key is removed */
+		if (vif->type == NL80211_IFTYPE_AP &&
+		    !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
+		    rtlvif->hw_key_idx == key->hw_key_idx)
+			rtlvif->hw_key_idx = 0xff;
 		clear_bit(key->hw_key_idx, priv->cam_map);
 		retval = 0;
 		break;
@@ -7710,6 +7749,7 @@ static int rtl8xxxu_sta_add(struct ieee80211_hw *hw,
 	struct rtl8xxxu_sta_info *sta_info = (struct rtl8xxxu_sta_info *)sta->drv_priv;
 	struct rtl8xxxu_vif *rtlvif = (struct rtl8xxxu_vif *)vif->drv_priv;
 	struct rtl8xxxu_priv *priv = hw->priv;
+	u8 max_mac_id;
 
 	mutex_lock(&priv->sta_mutex);
 	ewma_rssi_init(&sta_info->avg_rssi);
@@ -7719,6 +7759,11 @@ static int rtl8xxxu_sta_add(struct ieee80211_hw *hw,
 		if (sta_info->macid >= RTL8XXXU_MAX_MAC_ID_NUM) {
 			mutex_unlock(&priv->sta_mutex);
 			return -ENOSPC;
+		}
+
+		if (priv->rtl_chip == RTL8188E) {
+			max_mac_id = rtl8xxxu_max_acquired_macid(priv);
+			rtl8xxxu_write8(priv, REG_TX_REPORT_CTRL + 1, max_mac_id + 1);
 		}
 
 		rtl8xxxu_refresh_rate_mask(priv, 0, sta, true);
@@ -7746,10 +7791,26 @@ static int rtl8xxxu_sta_remove(struct ieee80211_hw *hw,
 {
 	struct rtl8xxxu_sta_info *sta_info = (struct rtl8xxxu_sta_info *)sta->drv_priv;
 	struct rtl8xxxu_priv *priv = hw->priv;
+	u8 max_mac_id;
 
 	mutex_lock(&priv->sta_mutex);
-	if (vif->type == NL80211_IFTYPE_AP)
+	if (vif->type == NL80211_IFTYPE_AP) {
+		/*
+		 * Gen2/8188eu firmware keeps per-MACID state. Tell it the
+		 * station is gone before recycling the macid, otherwise the
+		 * old entry stays active and can stall or misdirect frames.
+		 * Gen1 chips use a global connect report, so skip for them.
+		 */
+		if (priv->fops->report_connect == rtl8xxxu_gen2_report_connect)
+			priv->fops->report_connect(priv, sta_info->macid,
+						 H2C_MACID_ROLE_STA, false);
 		rtl8xxxu_release_macid(priv, sta_info->macid);
+		if (priv->rtl_chip == RTL8188E) {
+			max_mac_id = rtl8xxxu_max_acquired_macid(priv);
+			rtl8xxxu_write8(priv, REG_TX_REPORT_CTRL + 1,
+					max_mac_id + 1);
+		}
+	}
 	mutex_unlock(&priv->sta_mutex);
 
 	return 0;
@@ -8124,6 +8185,7 @@ static int rtl8xxxu_probe(struct usb_interface *interface,
 err_set_intfdata:
 	usb_set_intfdata(interface, NULL);
 
+	kfree(priv->ra_info);
 	kfree(priv->fw_data);
 	mutex_destroy(&priv->usb_buf_mutex);
 	mutex_destroy(&priv->syson_indirect_access_mutex);
@@ -8152,6 +8214,7 @@ static void rtl8xxxu_disconnect(struct usb_interface *interface)
 
 	dev_info(&priv->udev->dev, "disconnecting\n");
 
+	kfree(priv->ra_info);
 	kfree(priv->fw_data);
 	mutex_destroy(&priv->usb_buf_mutex);
 	mutex_destroy(&priv->syson_indirect_access_mutex);
